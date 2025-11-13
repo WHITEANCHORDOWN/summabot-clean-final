@@ -278,6 +278,7 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     title_font = 22
     heading_font = 16
     body_font = 11
+    max_chars = 60  # МАКСИМУМ символов в строке, чтобы текст не вылезал за край
 
     title = data.get("title") or t(lang, "Конспект", "Summary")
     short = data.get("short_description") or ""
@@ -295,7 +296,7 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     if short:
         c.setFont(FONT_NAME, body_font)
         text = c.beginText(margin, height - margin - 80)
-        for line in _wrap_text(short, 90):
+        for line in _wrap_text(short, max_chars):
             text.textLine(line)
         c.drawText(text)
 
@@ -314,7 +315,7 @@ def build_pdf(lang: str, data: Dict) -> bytes:
         text.setFont(FONT_NAME, body_font)
 
         for bullet in bullets:
-            lines = _wrap_text(bullet, 90)
+            lines = _wrap_text(bullet, max_chars)
             for i, line in enumerate(lines):
                 prefix = "• " if i == 0 else "   "
                 text.textLine(prefix + line)
@@ -344,15 +345,6 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     return buf.read()
 
 
-    # ---------- сами секции ----------
-    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
-    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
-    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
-    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
-
-    c.save()
-    buf.seek(0)
-    return buf.read()
 
     # ---------- титульная страница ----------
     c.setFont(FONT_NAME, 22)
