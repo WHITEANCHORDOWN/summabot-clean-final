@@ -1,3 +1,5 @@
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 import os
 import io
@@ -56,6 +58,28 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ---------- Мини HTTP-сервер для Render (healthcheck) ----------
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        # Глушим лишний шум в логах
+        return
+
+
+def start_health_server():
+    """Простой HTTP-сервер, чтобы Render видел открытый порт."""
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logger.info(f"Health server listening on port {port}")
+    server.serve_forever()
+
 
 _SLIDES_SERVICE = None
 _DRIVE_SERVICE = None
@@ -664,4 +688,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # 1) Запускаем мини веб-сервер в фоне (для Render)
+    threading.Thread(target=start_health_server, daemon=True).start()
+
+    # 2) Запускаем Telegram-бота (polling)
     main()
