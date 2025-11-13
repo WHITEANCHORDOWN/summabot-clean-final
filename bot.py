@@ -8,6 +8,7 @@ import tempfile
 import subprocess
 from typing import Dict, List, Tuple
 
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import (
     Update,
@@ -213,8 +214,39 @@ async def structure_text(raw_text: str) -> Tuple[str, Dict]:
             "action_plan": [],
             "conclusion": [],
         }
+        return lang, data
+
+    # Нормализация: всё, что должно быть списками — превращаем в списки строк
+    for key in ["summary", "key_tasks", "action_plan", "conclusion"]:
+        value = data.get(key)
+        if isinstance(value, str):
+            data[key] = [value]
+        elif isinstance(value, list):
+            data[key] = [str(x) for x in value if x]
+        else:
+            data[key] = []
+
+    # Заголовки и описания — в строки
+    if not isinstance(data.get("title"), str):
+        data["title"] = str(data.get("title", ""))[:120]
+    if not isinstance(data.get("short_description"), str):
+        data["short_description"] = str(data.get("short_description", ""))[:400]
 
     return lang, data
+def _normalize_bullets_list(raw: List[str]) -> List[str]:
+    """
+    Чистим список пунктов:
+    - конвертируем в строки
+    - убираем лишние переводы строк и двойные пробелы
+    """
+    cleaned: List[str] = []
+    for item in raw:
+        if not item:
+            continue
+        text = " ".join(str(item).split())  # все виды пробелов/переносов -> один пробел
+        if text:
+            cleaned.append(text)
+    return cleaned
 
 
 # ---------- PDF ----------
@@ -242,62 +274,140 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     c = canvas.Canvas(buf, pagesize=A4)
     width, height = A4
 
+    margin = 72  # ~2 см
+    title_font = 22
+    heading_font = 16
+    body_font = 11
+
     title = data.get("title") or t(lang, "Конспект", "Summary")
     short = data.get("short_description") or ""
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    def page_title():
-        # Заголовок + краткое описание
-        c.setFont(FONT_NAME, 22)
-        c.drawString(72, height - 90, title)
-        c.setFont(FONT_NAME, 11)
-        text_obj = c.beginText(72, height - 120)
+    # ---------- титульная страница ----------
+    c.setFont(FONT_NAME, title_font)
+    title_w = c.stringWidth(title, FONT_NAME, title_font)
+    c.drawString((width - title_w) / 2, height - margin - 10, title)
+
+    c.setFont(FONT_NAME, 10)
+    date_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
+    c.drawString(margin, height - margin - 40, date_text)
+
+    if short:
+        c.setFont(FONT_NAME, body_font)
+        text = c.beginText(margin, height - margin - 80)
         for line in _wrap_text(short, 90):
-            text_obj.textLine(line)
-        c.drawText(text_obj)
-        c.showPage()
+            text.textLine(line)
+        c.drawText(text)
 
-    def section(name_key: str, list_key: str):
-        items = data.get(list_key) or []
-        if not items:
+    c.showPage()
+
+    # ---------- вспомогательная функция для секций ----------
+    def draw_section(heading: str, bullets: List[str]):
+        bullets = _normalize_bullets_list(bullets)
+        if not bullets:
             return
-        heading = {
-            "summary": t(lang, "Краткое содержание", "Summary"),
-            "key_tasks": t(lang, "Ключевые задачи", "Key tasks"),
-            "action_plan": t(lang, "План действий", "Action plan"),
-            "conclusion": t(lang, "Итог", "Conclusion"),
-        }[list_key]
 
-        c.setFont(FONT_NAME, 16)
-        c.drawString(72, height - 80, heading)
-        c.setFont(FONT_NAME, 11)
-        y = height - 110
-        line_height = 14
+        c.setFont(FONT_NAME, heading_font)
+        c.drawString(margin, height - margin, heading)
 
-        for bullet in items:
+        text = c.beginText(margin, height - margin - 30)
+        text.setFont(FONT_NAME, body_font)
+
+        for bullet in bullets:
             lines = _wrap_text(bullet, 90)
             for i, line in enumerate(lines):
-                if y < 80:
+                prefix = "• " if i == 0 else "   "
+                text.textLine(prefix + line)
+
+                # если подошли к низу страницы — перенос с тем же заголовком
+                if text.getY() < margin + 40:
+                    c.drawText(text)
                     c.showPage()
-                    c.setFont(FONT_NAME, 16)
-                    c.drawString(72, height - 80, heading)
-                    c.setFont(FONT_NAME, 11)
-                    y = height - 110
-                prefix = "• " if i == 0 else "  "
-                c.drawString(72, y, prefix + line)
-                y -= line_height
+                    c.setFont(FONT_NAME, heading_font)
+                    c.drawString(margin, height - margin, heading)
+                    text = c.beginText(margin, height - margin - 30)
+                    text.setFont(FONT_NAME, body_font)
+
+            text.textLine("")  # пустая строка между пунктами
+
+        c.drawText(text)
         c.showPage()
 
-    # Формируем документ
-    page_title()
-    section("summary", "summary")
-    section("key_tasks", "key_tasks")
-    section("action_plan", "action_plan")
-    section("conclusion", "conclusion")
+    # ---------- сами секции ----------
+    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
+    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
+    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
+    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
 
     c.save()
     buf.seek(0)
     return buf.read()
 
+    # ---------- титульная страница ----------
+    c.setFont(FONT_NAME, 22)
+    c.drawString(margin, height - margin - 10, title)
+
+    c.setFont(FONT_NAME, 10)
+    c.drawString(
+        margin,
+        height - margin - 35,
+        t(lang, f"Создано: {created_at}", f"Created: {created_at}"),
+    )
+
+    if short:
+        c.setFont(FONT_NAME, 11)
+        text = c.beginText(margin, height - margin - 70)
+        for line in _wrap_text(short, 90):
+            text.textLine(line)
+        c.drawText(text)
+
+    c.showPage()
+
+    # ---------- вспомогательная функция для секций ----------
+    def draw_section(heading: str, bullets: List[str]):
+        if not bullets:
+            return
+
+        nonlocal c
+        c.setFont(FONT_NAME, 16)
+        c.drawString(margin, height - margin, heading)
+
+        text = c.beginText(margin, height - margin - 30)
+        text.setFont(FONT_NAME, 11)
+
+        for bullet in bullets:
+            lines = _wrap_text(bullet, 90)
+            for i, line in enumerate(lines):
+                prefix = "• " if i == 0 else "   "
+                text.textLine(prefix + line)
+
+                # если подошли к низу страницы — перенос
+                if text.getY() < margin + 40:
+                    c.drawText(text)
+                    c.showPage()
+                    c.setFont(FONT_NAME, 16)
+                    c.drawString(margin, height - margin, heading)
+                    text = c.beginText(margin, height - margin - 30)
+                    text.setFont(FONT_NAME, 11)
+
+            text.textLine("")  # пустая строка между буллетами
+
+        c.drawText(text)
+        c.showPage()
+
+    # ---------- сами секции ----------
+    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
+    draw_section(
+        t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or []
+    )
+    draw_section(
+        t(lang, "План действий", "Action plan"), data.get("action_plan") or []
+    )
+    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
 
 # ---------- Google Slides ----------
 
@@ -625,28 +735,46 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         await send_slides(query, data, lang)
 
 
-async def send_pdf(query, data: Dict, lang: str):
-    await query.edit_message_text(
-        t(lang, "Создаю PDF…", "Creating PDF…")
+async def send_slides(query, data: Dict, lang: str):
+    await query.answer(
+        t(lang, "Создаю презентацию…", "Creating Google Slides deck…"),
+        show_alert=False,
     )
     try:
-        pdf_bytes = build_pdf(lang, data)
+        link = build_slides(lang, data)
     except Exception as e:
-        logger.exception("Ошибка при генерации PDF: %s", e)
-        await query.edit_message_text(
+        logger.exception("Ошибка при генерации Slides: %s", e)
+        await query.message.reply_text(
             t(
                 lang,
-                "Не удалось создать PDF. Попробуйте позже.",
-                "Failed to create PDF. Please try again later.",
+                "Не удалось создать презентацию. Проверьте настройки Google API.",
+                "Failed to create presentation. Please check Google API settings.",
             )
         )
         return
 
-    filename = (data.get("title") or "summary").replace(" ", "_")[:50] + ".pdf"
-    await query.message.reply_document(
-        document=pdf_bytes,
-        filename=filename,
-        caption=t(lang, "Вот ваш PDF-конспект 🤓", "Here is your PDF summary 🤓"),
+    await query.message.reply_text(
+        t(
+            lang,
+            f"Готово! Вот ссылка на презентацию:\n{link}",
+            f"Done! Here is your deck:\n{link}",
+        )
+    )
+
+    # Предложим ещё формат
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 PDF", callback_data="format_pdf"),
+            InlineKeyboardButton("📊 Google Slides", callback_data="format_slides"),
+        ]
+    ]
+    await query.message.reply_text(
+        t(
+            lang,
+            "Хотите также сохранить в другом формате?",
+            "Do you also want another format?",
+        ),
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -673,6 +801,22 @@ async def send_slides(query, data: Dict, lang: str):
             f"Готово! Вот ссылка на презентацию:\n{link}",
             f"Done! Here is your deck:\n{link}",
         )
+    )
+
+    # Предложим ещё формат
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 PDF", callback_data="format_pdf"),
+            InlineKeyboardButton("📊 Google Slides", callback_data="format_slides"),
+        ]
+    ]
+    await query.message.reply_text(
+        t(
+            lang,
+            "Хотите также сохранить в другом формате?",
+            "Do you also want another format?",
+        ),
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
