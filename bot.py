@@ -278,36 +278,58 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     title_font = 22
     heading_font = 16
     body_font = 11
-    max_chars = 60  # МАКСИМУМ символов в строке, чтобы текст не вылезал за край
+    max_chars = 60  # чтобы строки не вылезали за край
 
     title = data.get("title") or t(lang, "Конспект", "Summary")
     short = data.get("short_description") or ""
     created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
 
+    # ---------- хедер и футер ----------
+
+    def draw_header():
+        """Дата/время вверху слева."""
+        header_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
+        c.setFont(FONT_NAME, 9)
+        # Чуть отступаем от самого верха, чтобы не прилипало к краю страницы
+        c.drawString(margin, height - 40, header_text)
+
+    def draw_footer():
+        """Имя бота внизу по центру."""
+        footer_text = "summarinotebot"
+        footer_font = 9
+        c.setFont(FONT_NAME, footer_font)
+        fw = c.stringWidth(footer_text, FONT_NAME, footer_font)
+        c.drawString((width - fw) / 2, 30, footer_text)
+
     # ---------- титульная страница ----------
+
+    draw_header()
+
     c.setFont(FONT_NAME, title_font)
     title_w = c.stringWidth(title, FONT_NAME, title_font)
-    c.drawString((width - title_w) / 2, height - margin - 10, title)
-
-    c.setFont(FONT_NAME, 10)
-    date_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
-    c.drawString(margin, height - margin - 40, date_text)
+    # Заголовок по центру
+    c.drawString((width - title_w) / 2, height - 80, title)
 
     if short:
         c.setFont(FONT_NAME, body_font)
-        text = c.beginText(margin, height - margin - 80)
+        text = c.beginText(margin, height - 130)
         for line in _wrap_text(short, max_chars):
             text.textLine(line)
         c.drawText(text)
 
+    # футер титульной
+    draw_footer()
     c.showPage()
 
     # ---------- вспомогательная функция для секций ----------
+
     def draw_section(heading: str, bullets: List[str]):
         bullets = _normalize_bullets_list(bullets)
         if not bullets:
             return
 
+        # новая страница секции
+        draw_header()
         c.setFont(FONT_NAME, heading_font)
         c.drawString(margin, height - margin, heading)
 
@@ -320,10 +342,14 @@ def build_pdf(lang: str, data: Dict) -> bytes:
                 prefix = "• " if i == 0 else "   "
                 text.textLine(prefix + line)
 
-                # если подошли к низу страницы — перенос с тем же заголовком
+                # если приблизились к низу — закрываем страницу,
+                # рисуем футер и открываем новую с тем же заголовком
                 if text.getY() < margin + 40:
                     c.drawText(text)
+                    draw_footer()
                     c.showPage()
+
+                    draw_header()
                     c.setFont(FONT_NAME, heading_font)
                     c.drawString(margin, height - margin, heading)
                     text = c.beginText(margin, height - margin - 30)
@@ -332,7 +358,19 @@ def build_pdf(lang: str, data: Dict) -> bytes:
             text.textLine("")  # пустая строка между пунктами
 
         c.drawText(text)
+        draw_footer()
         c.showPage()
+
+    # ---------- сами секции ----------
+
+    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
+    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
+    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
+    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
 
     # ---------- сами секции ----------
     draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
