@@ -279,54 +279,77 @@ def build_pdf(lang: str, data: Dict) -> bytes:
 
     # ---------- хедер и футер ----------
 
+  # ---------- PDF ----------
+
+def build_pdf(lang: str, data: Dict) -> bytes:
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+
+    # ----- визуальные параметры -----
+    margin = 72
+    title_font = 22
+    heading_font = 16
+    body_font = 11
+    header_footer_font = 9
+    max_chars = 60  # гарантированный перенос строк
+
+    title = data.get("title") or t(lang, "Конспект", "Summary")
+    short = data.get("short_description") or ""
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # ----- координаты -----
+    header_text_y = height - 40
+    header_line_y = header_text_y - 4
+
+    footer_text_y = 30
+    footer_line_y = footer_text_y + 14
+    bottom_limit = footer_line_y + 25
+
+    date_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
+
+    # ---------- Header ----------
     def draw_header():
-        """Дата/время сверху слева + тонкая линия."""
-        c.setFont(FONT_NAME, 9)
+        c.setFont(FONT_NAME, header_footer_font)
         c.drawString(margin, header_text_y, date_text)
         c.setLineWidth(0.5)
         c.line(margin, header_line_y, width - margin, header_line_y)
 
+    # ---------- Footer ----------
     def draw_footer():
-        """Имя бота снизу по центру + тонкая линия с воздухом."""
         footer_text = "summarinotebot"
-        footer_font = 9
         c.setLineWidth(0.5)
-        # линия выше текста
         c.line(margin, footer_line_y, width - margin, footer_line_y)
-        c.setFont(FONT_NAME, footer_font)
-        fw = c.stringWidth(footer_text, FONT_NAME, footer_font)
+        c.setFont(FONT_NAME, header_footer_font)
+        fw = c.stringWidth(footer_text, FONT_NAME, header_footer_font)
         c.drawString((width - fw) / 2, footer_text_y, footer_text)
 
-    # ---------- титульная страница ----------
-
+    # ---------- Title Page ----------
     draw_header()
 
-    # Заголовок по центру
+    # Заголовок
     c.setFont(FONT_NAME, title_font)
     title_w = c.stringWidth(title, FONT_NAME, title_font)
     c.drawString((width - title_w) / 2, height - 120, title)
 
-    # Краткое описание — тоже по центру под заголовком
+    # Краткое описание — центрировано
     if short:
         c.setFont(FONT_NAME, body_font)
         y = height - 170
         for line in _wrap_text(short, max_chars):
-            line_w = c.stringWidth(line, FONT_NAME, body_font)
-            x = (width - line_w) / 2
-            c.drawString(x, y, line)
-            y -= body_font + 4  # шаг между строками
+            lw = c.stringWidth(line, FONT_NAME, body_font)
+            c.drawString((width - lw) / 2, y, line)
+            y -= body_font + 4
 
     draw_footer()
     c.showPage()
 
-    # ---------- вспомогательная функция для секций ----------
-
+    # ---------- Sections ----------
     def draw_section(heading: str, bullets: List[str]):
         bullets = _normalize_bullets_list(bullets)
         if not bullets:
             return
 
-        # Новая страница секции
         draw_header()
         c.setFont(FONT_NAME, heading_font)
         c.drawString(margin, height - margin, heading)
@@ -336,11 +359,12 @@ def build_pdf(lang: str, data: Dict) -> bytes:
 
         for bullet in bullets:
             lines = _wrap_text(bullet, max_chars)
+
             for i, line in enumerate(lines):
                 prefix = "• " if i == 0 else "   "
                 text.textLine(prefix + line)
 
-                # Если подходим к низу страницы — перенос
+                # перелистываем
                 if text.getY() < bottom_limit:
                     c.drawText(text)
                     draw_footer()
@@ -352,162 +376,23 @@ def build_pdf(lang: str, data: Dict) -> bytes:
                     text = c.beginText(margin, height - margin - 30)
                     text.setFont(FONT_NAME, body_font)
 
-            text.textLine("")  # пустая строка между пунктами
+            text.textLine("")  # отступ между пунктами
 
         c.drawText(text)
         draw_footer()
         c.showPage()
 
-    # ---------- сами секции ----------
-
+    # ---------- Run all sections ----------
     draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
     draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
     draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
     draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
 
+    # ---------- Output ----------
     c.save()
     buf.seek(0)
     return buf.read()
 
-    # ---------- вспомогательная функция для секций ----------
-
-    def draw_section(heading: str, bullets: List[str]):
-        bullets = _normalize_bullets_list(bullets)
-        if not bullets:
-            return
-
-        # Новая страница секции
-        draw_header()
-        c.setFont(FONT_NAME, heading_font)
-        c.drawString(margin, height - margin, heading)
-
-        text = c.beginText(margin, height - margin - 30)
-        text.setFont(FONT_NAME, body_font)
-
-        for bullet in bullets:
-            lines = _wrap_text(bullet, max_chars)
-            for i, line in enumerate(lines):
-                prefix = "• " if i == 0 else "   "
-                text.textLine(prefix + line)
-
-                # Если подходим к низу страницы — перенос
-                if text.getY() < bottom_limit:
-                    c.drawText(text)
-                    draw_footer()
-                    c.showPage()
-
-                    # Новая страница с тем же заголовком
-                    draw_header()
-                    c.setFont(FONT_NAME, heading_font)
-                    c.drawString(margin, height - margin, heading)
-                    text = c.beginText(margin, height - margin - 30)
-                    text.setFont(FONT_NAME, body_font)
-
-            text.textLine("")  # пустая строка между пунктами
-
-        c.drawText(text)
-        draw_footer()
-        c.showPage()
-
-    # ---------- сами секции ----------
-
-    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
-    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
-    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
-    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
-
-    c.save()
-    buf.seek(0)
-    return buf.read()
-
-    # ---------- сами секции ----------
-
-    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
-    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
-    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
-    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
-
-    c.save()
-    buf.seek(0)
-    return buf.read()
-
-    # ---------- сами секции ----------
-    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
-    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
-    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
-    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
-
-    c.save()
-    buf.seek(0)
-    return buf.read()
-
-
-
-    # ---------- титульная страница ----------
-    c.setFont(FONT_NAME, 22)
-    c.drawString(margin, height - margin - 10, title)
-
-    c.setFont(FONT_NAME, 10)
-    c.drawString(
-        margin,
-        height - margin - 35,
-        t(lang, f"Создано: {created_at}", f"Created: {created_at}"),
-    )
-
-    if short:
-        c.setFont(FONT_NAME, 11)
-        text = c.beginText(margin, height - margin - 70)
-        for line in _wrap_text(short, 90):
-            text.textLine(line)
-        c.drawText(text)
-
-    c.showPage()
-
-    # ---------- вспомогательная функция для секций ----------
-    def draw_section(heading: str, bullets: List[str]):
-        if not bullets:
-            return
-
-        nonlocal c
-        c.setFont(FONT_NAME, 16)
-        c.drawString(margin, height - margin, heading)
-
-        text = c.beginText(margin, height - margin - 30)
-        text.setFont(FONT_NAME, 11)
-
-        for bullet in bullets:
-            lines = _wrap_text(bullet, 90)
-            for i, line in enumerate(lines):
-                prefix = "• " if i == 0 else "   "
-                text.textLine(prefix + line)
-
-                # если подошли к низу страницы — перенос
-                if text.getY() < margin + 40:
-                    c.drawText(text)
-                    c.showPage()
-                    c.setFont(FONT_NAME, 16)
-                    c.drawString(margin, height - margin, heading)
-                    text = c.beginText(margin, height - margin - 30)
-                    text.setFont(FONT_NAME, 11)
-
-            text.textLine("")  # пустая строка между буллетами
-
-        c.drawText(text)
-        c.showPage()
-
-    # ---------- сами секции ----------
-    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
-    draw_section(
-        t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or []
-    )
-    draw_section(
-        t(lang, "План действий", "Action plan"), data.get("action_plan") or []
-    )
-    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
-
-    c.save()
-    buf.seek(0)
-    return buf.read()
 
 # ---------- Google Slides ----------
 
@@ -922,8 +807,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # 1) Запускаем мини веб-сервер в фоне (для Render)
-    threading.Thread(target=start_health_server, daemon=True).start()
-
-    # 2) Запускаем Telegram-бота (polling)
     main()
