@@ -26,6 +26,12 @@ from openai import OpenAI
 
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+# Unicode-шрифт для PDF (поддерживает кириллицу)
+FONT_NAME = "DejaVuSans"
+pdfmetrics.registerFont(TTFont(FONT_NAME, "DejaVuSans.ttf"))
+
 
 # Google API (для Slides; если не установлено/не настроено – просто не будет работать этот формат)
 try:
@@ -231,7 +237,6 @@ def _wrap_text(text: str, max_chars: int) -> List[str]:
         lines.append(" ".join(line))
     return lines or [""]
 
-
 def build_pdf(lang: str, data: Dict) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
@@ -241,9 +246,10 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     short = data.get("short_description") or ""
 
     def page_title():
-        c.setFont("Helvetica-Bold", 22)
+        # Заголовок + краткое описание
+        c.setFont(FONT_NAME, 22)
         c.drawString(72, height - 90, title)
-        c.setFont("Helvetica", 11)
+        c.setFont(FONT_NAME, 11)
         text_obj = c.beginText(72, height - 120)
         for line in _wrap_text(short, 90):
             text_obj.textLine(line)
@@ -261,9 +267,9 @@ def build_pdf(lang: str, data: Dict) -> bytes:
             "conclusion": t(lang, "Итог", "Conclusion"),
         }[list_key]
 
-        c.setFont("Helvetica-Bold", 16)
+        c.setFont(FONT_NAME, 16)
         c.drawString(72, height - 80, heading)
-        c.setFont("Helvetica", 11)
+        c.setFont(FONT_NAME, 11)
         y = height - 110
         line_height = 14
 
@@ -272,15 +278,16 @@ def build_pdf(lang: str, data: Dict) -> bytes:
             for i, line in enumerate(lines):
                 if y < 80:
                     c.showPage()
-                    c.setFont("Helvetica-Bold", 16)
+                    c.setFont(FONT_NAME, 16)
                     c.drawString(72, height - 80, heading)
-                    c.setFont("Helvetica", 11)
+                    c.setFont(FONT_NAME, 11)
                     y = height - 110
                 prefix = "• " if i == 0 else "  "
                 c.drawString(72, y, prefix + line)
                 y -= line_height
         c.showPage()
 
+    # Формируем документ
     page_title()
     section("summary", "summary")
     section("key_tasks", "key_tasks")
