@@ -343,6 +343,17 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     buf.seek(0)
     return buf.read()
 
+
+    # ---------- сами секции ----------
+    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
+    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
+    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
+    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
     # ---------- титульная страница ----------
     c.setFont(FONT_NAME, 22)
     c.drawString(margin, height - margin - 10, title)
@@ -776,47 +787,30 @@ async def send_slides(query, data: Dict, lang: str):
         ),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-
-
-async def send_slides(query, data: Dict, lang: str):
-    await query.edit_message_text(
-        t(lang, "Создаю презентацию в Google Slides…", "Creating Google Slides deck…")
+async def send_pdf(query, data: Dict, lang: str):
+    # Показываем маленькое уведомление, клавиатура с кнопками остаётся
+    await query.answer(
+        t(lang, "Создаю PDF…", "Creating PDF…"),
+        show_alert=False,
     )
     try:
-        link = build_slides(lang, data)
+        pdf_bytes = build_pdf(lang, data)
     except Exception as e:
-        logger.exception("Ошибка при генерации Slides: %s", e)
-        await query.edit_message_text(
+        logger.exception("Ошибка при генерации PDF: %s", e)
+        await query.message.reply_text(
             t(
                 lang,
-                "Не удалось создать презентацию. Проверьте настройки Google API.",
-                "Failed to create presentation. Please check Google API settings.",
+                "Не удалось создать PDF. Попробуйте позже.",
+                "Failed to create PDF. Please try again later.",
             )
         )
         return
 
-    await query.message.reply_text(
-        t(
-            lang,
-            f"Готово! Вот ссылка на презентацию:\n{link}",
-            f"Done! Here is your deck:\n{link}",
-        )
-    )
-
-    # Предложим ещё формат
-    keyboard = [
-        [
-            InlineKeyboardButton("📄 PDF", callback_data="format_pdf"),
-            InlineKeyboardButton("📊 Google Slides", callback_data="format_slides"),
-        ]
-    ]
-    await query.message.reply_text(
-        t(
-            lang,
-            "Хотите также сохранить в другом формате?",
-            "Do you also want another format?",
-        ),
-        reply_markup=InlineKeyboardMarkup(keyboard),
+    filename = (data.get("title") or "summary").replace(" ", "_")[:50] + ".pdf"
+    await query.message.reply_document(
+        document=pdf_bytes,
+        filename=filename,
+        caption=t(lang, "Вот ваш PDF-конспект 🤓", "Here is your PDF summary 🤓"),
     )
 
 
