@@ -23,7 +23,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# 📄 Нормальный PDF через Platypus (авто-перенос и новые страницы)
+# 📄 PDF через Platypus
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
@@ -35,12 +35,10 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 
-
 # ---------- PDF-шрифт ----------
 
 FONT_NAME = "DejaVuSans"  # файл DejaVuSans.ttf должен лежать рядом с bot.py
 pdfmetrics.registerFont(TTFont(FONT_NAME, "DejaVuSans.ttf"))
-
 
 # ---------- Конфиг ----------
 
@@ -114,8 +112,8 @@ async def transcribe_audio(path: str) -> str:
 
 async def structure_text(raw_text: str) -> Tuple[str, Dict]:
     """
-    Делаем строгую структуру: title, short_description, summary, key_tasks, action_plan, conclusion.
-    Ничего не придумываем, только на основе текста.
+    Строгая структура: title, short_description, summary, key_tasks, action_plan, conclusion.
+    Ничего не придумываем, только из исходного текста.
     """
     lang = detect_language(raw_text)
 
@@ -155,7 +153,7 @@ async def structure_text(raw_text: str) -> Tuple[str, Dict]:
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        logger.warning("Не удалось распарсить JSON, возвращаю fallback")
+        logger.warning("Не удалось распарсить JSON, fallback")
         data = {
             "title": raw_text[:80],
             "short_description": raw_text[:200],
@@ -176,7 +174,7 @@ async def structure_text(raw_text: str) -> Tuple[str, Dict]:
         else:
             data[key] = []
 
-    # Заголовки и описания — в строки
+    # Заголовок и описание — строки
     if not isinstance(data.get("title"), str):
         data["title"] = str(data.get("title", ""))[:120]
     if not isinstance(data.get("short_description"), str):
@@ -185,14 +183,10 @@ async def structure_text(raw_text: str) -> Tuple[str, Dict]:
     return lang, data
 
 
-# ---------- Вспомогательные функции для текста ----------
+# ---------- Текстовые утилиты ----------
 
 def _normalize_bullets_list(raw: List[str]) -> List[str]:
-    """
-    Чистим список пунктов:
-    - конвертируем в строки
-    - убираем лишние переводы строк и двойные пробелы
-    """
+    """Чистим список пунктов: строки, убираем лишние пробелы/переводы."""
     cleaned: List[str] = []
     for item in raw:
         if not item:
@@ -203,25 +197,54 @@ def _normalize_bullets_list(raw: List[str]) -> List[str]:
     return cleaned
 
 
-# ---------- PDF (автоперенос и новые страницы) ----------
+# ---------- PDF: отдельные страницы + хедер/футер ----------
 
 def build_pdf(lang: str, data: Dict) -> bytes:
     """
-    Аккуратный PDF:
-    - нормальные отступы
-    - автоперенос строк
-    - автоматическое добавление новых страниц, если текста много
-    - списки через bullets
+    Макет:
+    - дата/время вверху слева на каждой странице;
+    - снизу линия + под ней название бота;
+    - 1-я страница: title по центру, ниже H2 (short_description), ниже Summary;
+    - 2-я страница: Key tasks;
+    - 3-я страница: Action plan;
+    - 4-я страница: Conclusion;
+    - авто-перенос строк, текст не вылезает за поля.
     """
     buf = io.BytesIO()
+    width, height = A4
 
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+    created_label = t(lang, "Создано: ", "Created: ") + created_at
+    footer_text = "summarinotebot"
+
+    def add_page_frame(canvas, doc):
+        canvas.saveState()
+
+        # Хедер — дата
+        canvas.setFont(FONT_NAME, 9)
+        canvas.drawString(doc.leftMargin, height - 30, created_label)
+
+        # Линия над футером
+        line_y = 35
+        canvas.setLineWidth(0.5)
+        canvas.line(doc.leftMargin, line_y, width - doc.rightMargin, line_y)
+
+        # Футер — название бота под линией
+        footer_y = 22
+        fw = canvas.stringWidth(footer_text, FONT_NAME, 9)
+        canvas.setFont(FONT_NAME, 9)
+        canvas.drawString((width - fw) / 2, footer_y, footer_text)
+
+        canvas.restoreState()
+
+    # Чуть шире поля, чтобы текст не казался «сжатым»
     doc = SimpleDocTemplate(
         buf,
         pagesize=A4,
-        leftMargin=40,
-        rightMargin=40,
-        topMargin=60,
-        bottomMargin=40,
+        leftMargin=32,   # было 40
+        rightMargin=32,  # было 40
+        topMargin=70,
+        bottomMargin=50,
     )
 
     styles = getSampleStyleSheet()
@@ -230,39 +253,28 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     base = styles["Normal"]
     base.fontName = FONT_NAME
     base.fontSize = 11
-    base.leading = 14
+    base.leading = 15
 
-    # Заголовок (первая страница)
+    # TITLE (по центру)
     title_style = ParagraphStyle(
         "TitleCustom",
         parent=styles["Title"],
         fontName=FONT_NAME,
-        fontSize=22,
-        leading=26,
+        fontSize=24,
+        leading=28,
         alignment=TA_CENTER,
-        spaceAfter=16,
+        spaceAfter=10,
     )
 
-    # Краткое описание
+    # H2 под title — краткое описание
     short_style = ParagraphStyle(
         "ShortDesc",
-        parent=styles["Normal"],
+        parent=styles["Heading2"],
         fontName=FONT_NAME,
-        fontSize=12,
-        leading=16,
+        fontSize=14,
+        leading=18,
         alignment=TA_CENTER,
         spaceAfter=20,
-    )
-
-    # Дата
-    date_style = ParagraphStyle(
-        "Date",
-        parent=styles["Normal"],
-        fontName=FONT_NAME,
-        fontSize=9,
-        leading=11,
-        alignment=TA_LEFT,
-        spaceAfter=15,
     )
 
     # Заголовки секций
@@ -273,70 +285,77 @@ def build_pdf(lang: str, data: Dict) -> bytes:
         fontSize=16,
         leading=20,
         alignment=TA_LEFT,
-        spaceBefore=12,
+        spaceBefore=10,
         spaceAfter=8,
     )
 
-    # Текст списков
+    # Текст списков — чуть «шире» (меньше отступов)
     bullet_style = ParagraphStyle(
         "BulletText",
         parent=styles["Normal"],
         fontName=FONT_NAME,
         fontSize=11,
-        leading=14,
+        leading=15,
         leftIndent=0,
+        spaceAfter=2,
     )
 
     story: List = []
 
     title = data.get("title") or t(lang, "Конспект", "Summary")
     short = data.get("short_description") or ""
-    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-    created_label = t(lang, "Создано: ", "Created: ") + created_at
 
-    # ---------- титульная часть ----------
+    # ---------- 1-я страница: title + подзаголовок + Summary ----------
+    story.append(Spacer(1, height * 0.12))  # чуть опустить заголовок
+
     story.append(Paragraph(title, title_style))
+
     if short:
         story.append(Paragraph(short, short_style))
-    story.append(Paragraph(created_label, date_style))
-    story.append(Spacer(1, 12))
+    else:
+        story.append(Spacer(1, 16))
 
-    # Можно явно добавить разрыв страницы после титула, если нужно
-    story.append(PageBreak())
-
-    # ---------- секции ----------
     def add_section(heading: str, bullets: List[str]):
         bullets_norm = _normalize_bullets_list(bullets)
         if not bullets_norm:
-            return
+            return []
 
-        story.append(Paragraph(heading, heading_style))
+        elements: List = []
+        elements.append(Paragraph(heading, heading_style))
 
         items = []
         for b in bullets_norm:
             p = Paragraph(b, bullet_style)
-            items.append(ListItem(p, leftIndent=10))
+            items.append(ListItem(p, leftIndent=6))  # небольшой отступ
 
-        story.append(
+        elements.append(
             ListFlowable(
                 items,
                 bulletType="bullet",
                 bulletFontName=FONT_NAME,
                 bulletFontSize=11,
                 bulletIndent=0,
-                leftIndent=15,
+                leftIndent=14,   # меньше отступ → визуально «шире»
                 spaceBefore=4,
-                spaceAfter=10,
+                spaceAfter=6,
             )
         )
+        return elements
 
-    add_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
-    add_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
-    add_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
-    add_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
+    # Summary на 1-й странице
+    story.extend(add_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or []))
 
-    # Platypus сам разобьёт story на страницы по высоте
-    doc.build(story)
+    # Остальные секции — с новой страницы каждая
+    story.append(PageBreak())
+    story.extend(add_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or []))
+
+    story.append(PageBreak())
+    story.extend(add_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or []))
+
+    story.append(PageBreak())
+    story.extend(add_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or []))
+
+    doc.build(story, onFirstPage=add_page_frame, onLaterPages=add_page_frame)
 
     pdf_bytes = buf.getvalue()
     buf.close()
@@ -422,13 +441,10 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "conclusion": [],
         }
 
-    # сохраним в chat_data
     context.chat_data["last_lang"] = lang
     context.chat_data["last_structured"] = data
 
-    keyboard = [
-        [InlineKeyboardButton("📄 PDF", callback_data="format_pdf")]
-    ]
+    keyboard = [[InlineKeyboardButton("📄 PDF", callback_data="format_pdf")]]
 
     text = t(
         lang,
@@ -506,3 +522,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
