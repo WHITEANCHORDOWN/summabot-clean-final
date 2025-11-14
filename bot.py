@@ -1,5 +1,3 @@
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 import os
 import io
@@ -7,14 +5,10 @@ import json
 import tempfile
 import subprocess
 from typing import Dict, List, Tuple
-
 from datetime import datetime
+
 from dotenv import load_dotenv
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,19 +23,19 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-# Unicode-шрифт для PDF (поддерживает кириллицу)
-FONT_NAME = "DejaVuSans"
-pdfmetrics.registerFont(TTFont(FONT_NAME, "DejaVuSans.ttf"))
-
 
 # Google API (для Slides; если не установлено/не настроено – просто не будет работать этот формат)
 try:
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
-except ImportError:
+except ImportError:  # когда библиотеки не установлены
     Credentials = None
     build = None
 
+# ---------- PDF-шрифт ----------
+
+FONT_NAME = "DejaVuSans"  # должен лежать рядом с bot.py
+pdfmetrics.registerFont(TTFont(FONT_NAME, "DejaVuSans.ttf"))
 
 # ---------- Конфиг ----------
 
@@ -51,7 +45,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # содержимое JSON серв. аккаунта
 
-MAX_AUDIO_BYTES = 24 * 1024 * 1024  # ~24MB лимит
+MAX_AUDIO_BYTES = 24 * 1024 * 1024  # ~24MB
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("Нет TELEGRAM_BOT_TOKEN")
@@ -66,28 +60,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------- Мини HTTP-сервер для Render (healthcheck) ----------
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, format, *args):
-        # Глушим лишний шум в логах
-        return
-
-
-def start_health_server():
-    """Простой HTTP-сервер, чтобы Render видел открытый порт."""
-    port = int(os.environ.get("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    logger.info(f"Health server listening on port {port}")
-    server.serve_forever()
-
-
 _SLIDES_SERVICE = None
 _DRIVE_SERVICE = None
 
@@ -95,7 +67,7 @@ _DRIVE_SERVICE = None
 # ---------- Утилиты ----------
 
 def detect_language(text: str) -> str:
-    """Примитивная проверка: если есть кириллица — ru, иначе en."""
+    """Примитивно: если есть кириллица — ru, иначе en."""
     for ch in text:
         if "а" <= ch.lower() <= "я" or ch in "ёЁ":
             return "ru"
@@ -155,7 +127,7 @@ async def transcribe_audio(path: str) -> str:
     """Распознаём аудио в текст."""
     with open(path, "rb") as f:
         result = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",  # можно заменить на whisper-1
+            model="gpt-4o-mini-transcribe",  # можно заменить на "whisper-1"
             file=f,
             response_format="text",
         )
@@ -216,7 +188,7 @@ async def structure_text(raw_text: str) -> Tuple[str, Dict]:
         }
         return lang, data
 
-    # Нормализация: всё, что должно быть списками — превращаем в списки строк
+    # Нормализация списков
     for key in ["summary", "key_tasks", "action_plan", "conclusion"]:
         value = data.get(key)
         if isinstance(value, str):
@@ -233,51 +205,7 @@ async def structure_text(raw_text: str) -> Tuple[str, Dict]:
         data["short_description"] = str(data.get("short_description", ""))[:400]
 
     return lang, data
-def _normalize_bullets_list(raw: List[str]) -> List[str]:
-    """
-    Чистим список пунктов:
-    - конвертируем в строки
-    - убираем лишние переводы строк и двойные пробелы
-    """
-    cleaned: List[str] = []
-    for item in raw:
-        if not item:
-            continue
-        text = " ".join(str(item).split())  # все виды пробелов/переносов -> один пробел
-        if text:
-            cleaned.append(text)
-    return cleaned
 
-
-# ---------- PDF ----------
-
-def build_pdf(lang: str, data: Dict) -> bytes:
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
-
-    margin = 72  # ~2 см слева/справа
-    title_font = 22
-    heading_font = 16
-    body_font = 11
-    max_chars = 60  # чтобы строки точно не вылезали за край
-
-    title = data.get("title") or t(lang, "Конспект", "Summary")
-    short = data.get("short_description") or ""
-    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    # Положения хедера/футера
-    header_text_y = height - 40
-    header_line_y = header_text_y - 4
-
-    # Чуть ниже линия, а текст футера еще ниже, чтобы не прилипал
-    footer_text_y = 30          # текст ближе к низу
-    footer_line_y = footer_text_y + 14  # линия на 14pt выше текста
-    bottom_limit = footer_line_y + 25   # ниже этого не пишем текст
-
-    date_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
-
-    # ---------- хедер и футер ----------
 
 # ---------- PDF ----------
 
@@ -291,16 +219,14 @@ def _normalize_bullets_list(raw: List[str]) -> List[str]:
     for item in raw:
         if not item:
             continue
-        text = " ".join(str(item).split())  # все виды пробелов/переносов -> один пробел
+        text = " ".join(str(item).split())
         if text:
             cleaned.append(text)
     return cleaned
 
 
 def _wrap_text(text: str, max_chars: int) -> List[str]:
-    """
-    Примитивный перенос по словам: стараемся не выходить за max_chars символов в строке.
-    """
+    """Примитивный перенос по словам, чтобы не вылезать за max_chars."""
     words = text.split()
     lines: List[str] = []
     line: List[str] = []
@@ -340,10 +266,9 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     header_text_y = height - 40
     header_line_y = header_text_y - 4
 
-    # Футер: линия + подпись бота с «воздухом»
     footer_text_y = 30              # текст ближе к низу
-    footer_line_y = footer_text_y + 14  # линия выше текста
-    bottom_limit = footer_line_y + 25   # ниже этого текста не рисуем
+    footer_line_y = footer_text_y + 14  # линия над текстом
+    bottom_limit = footer_line_y + 25   # ниже этого не пишем текст
 
     date_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
 
@@ -405,7 +330,7 @@ def build_pdf(lang: str, data: Dict) -> bytes:
                 prefix = "• " if i == 0 else "   "
                 text.textLine(prefix + line)
 
-                # если подходим к нижней границе — переносим на новую страницу
+                # если подходим к низу страницы — перенос
                 if text.getY() < bottom_limit:
                     c.drawText(text)
                     draw_footer()
@@ -432,13 +357,17 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     buf.seek(0)
     return buf.read()
 
+
 # ---------- Google Slides ----------
 
-def _slides_title_and_bullets_requests(title: str, subtitle: str, slides_data: Dict[str, List[str]], lang: str):
-    """Формируем batchUpdate запросы: титульный + 4 секции."""
-    requests = []
-
-    # Удалим дефолтный слайд в презентации позже, здесь только создаём свои.
+def _slides_title_and_bullets_requests(
+    title: str,
+    subtitle: str,
+    slides_data: Dict[str, List[str]],
+    lang: str,
+):
+    """Формируем batchUpdate запросы: титульный + секции."""
+    requests: List[Dict] = []
 
     def title_slide():
         slide_id = "title-slide"
@@ -508,15 +437,19 @@ def _slides_title_and_bullets_requests(title: str, subtitle: str, slides_data: D
         ]
 
     def bullets_slides_for_section(title_text: str, bullets: List[str], base_id: str):
-        reqs = []
+        reqs: List[Dict] = []
+        bullets_norm = _normalize_bullets_list(bullets)
         chunk_size = 7
-        for idx in range(0, len(bullets), chunk_size):
-            chunk = bullets[idx : idx + chunk_size]
-            slide_id = f"{base_id}-{idx//chunk_size}"
-            title_shape_id = f"title-{base_id}-{idx//chunk_size}"
-            body_shape_id = f"body-{base_id}-{idx//chunk_size}"
+        for idx in range(0, len(bullets_norm), chunk_size):
+            chunk = bullets_norm[idx : idx + chunk_size]
+            slide_index = idx // chunk_size
+            slide_id = f"{base_id}-{slide_index}"
+            title_shape_id = f"title-{base_id}-{slide_index}"
+            body_shape_id = f"body-{base_id}-{slide_index}"
 
-            title_with_suffix = title_text if idx == 0 else f"{title_text} ({idx//chunk_size + 1})"
+            title_with_suffix = (
+                title_text if slide_index == 0 else f"{title_text} ({slide_index + 1})"
+            )
 
             reqs.extend(
                 [
@@ -596,8 +529,7 @@ def _slides_title_and_bullets_requests(title: str, subtitle: str, slides_data: D
     for key, bullets in slides_data.items():
         if not bullets:
             continue
-        reqs = bullets_slides_for_section(section_titles[key], bullets, key)
-        requests.extend(reqs)
+        requests.extend(bullets_slides_for_section(section_titles[key], bullets, key))
 
     return requests
 
@@ -678,7 +610,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 1) Сообщение «анализирую»
     status_msg = await message.reply_text("🔍 Анализирую аудио…")
 
     try:
@@ -690,8 +621,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ffmpeg_convert_to_mp3(input_path, output_path)
 
             raw_text = await transcribe_audio(output_path)
-    except Exception as e:
-        logger.exception("Ошибка на этапе аудио/ffmpeg/Whisper: %s", e)
+    except Exception:
+        logger.exception("Ошибка на этапе аудио/ffmpeg/Whisper")
         await status_msg.edit_text(
             "Не смог распознать аудио 😔 Попробуйте ещё раз, лучше в формате OGG/MP3."
         )
@@ -703,8 +634,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         lang, data = await structure_text(raw_text)
-    except Exception as e:
-        logger.exception("Ошибка при структурировании текста: %s", e)
+    except Exception:
+        logger.exception("Ошибка при структурировании текста")
         lang = detect_language(raw_text)
         data = {
             "title": raw_text[:80],
@@ -715,11 +646,10 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "conclusion": [],
         }
 
-    # Сохраняем в chat_data, чтобы использовать после выбора формата
+    # сохраним в chat_data
     context.chat_data["last_lang"] = lang
     context.chat_data["last_structured"] = data
 
-    # 2) «Финальный штрих» + выбор формата
     keyboard = [
         [
             InlineKeyboardButton("📄 PDF", callback_data="format_pdf"),
@@ -765,8 +695,8 @@ async def send_slides(query, data: Dict, lang: str):
     )
     try:
         link = build_slides(lang, data)
-    except Exception as e:
-        logger.exception("Ошибка при генерации Slides: %s", e)
+    except Exception:
+        logger.exception("Ошибка при генерации Slides")
         await query.message.reply_text(
             t(
                 lang,
@@ -784,7 +714,6 @@ async def send_slides(query, data: Dict, lang: str):
         )
     )
 
-    # Предложим ещё формат
     keyboard = [
         [
             InlineKeyboardButton("📄 PDF", callback_data="format_pdf"),
@@ -799,16 +728,17 @@ async def send_slides(query, data: Dict, lang: str):
         ),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
 async def send_pdf(query, data: Dict, lang: str):
-    # Показываем маленькое уведомление, клавиатура с кнопками остаётся
     await query.answer(
         t(lang, "Создаю PDF…", "Creating PDF…"),
         show_alert=False,
     )
     try:
         pdf_bytes = build_pdf(lang, data)
-    except Exception as e:
-        logger.exception("Ошибка при генерации PDF: %s", e)
+    except Exception:
+        logger.exception("Ошибка при генерации PDF")
         await query.message.reply_text(
             t(
                 lang,
@@ -828,7 +758,7 @@ async def send_pdf(query, data: Dict, lang: str):
 
 # ---------- main ----------
 
-def main():
+async def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -840,9 +770,18 @@ def main():
     )
     app.add_handler(CallbackQueryHandler(handle_format_choice))
 
-    logger.info("Bot started (polling)")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Bot started with webhook")
+
+    port = int(os.environ.get("PORT", 8443))
+    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        webhook_url=webhook_url,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
