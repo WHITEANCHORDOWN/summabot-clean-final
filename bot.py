@@ -204,10 +204,11 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     Макет:
     - дата/время вверху слева на каждой странице;
     - снизу линия + под ней название бота;
-    - 1-я страница: title по центру, ниже H2 (short_description), ниже Summary;
-    - 2-я страница: Key tasks;
-    - 3-я страница: Action plan;
-    - 4-я страница: Conclusion;
+    - 1-я страница: title по центру, ниже H2 (short_description), БЕЗ текста;
+    - 2-я страница: Summary;
+    - 3-я страница: Key tasks;
+    - 4-я страница: Action plan;
+    - 5-я страница: Conclusion;
     - авто-перенос строк, текст не вылезает за поля.
     """
     buf = io.BytesIO()
@@ -241,8 +242,8 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     doc = SimpleDocTemplate(
         buf,
         pagesize=A4,
-        leftMargin=32,   # было 40
-        rightMargin=32,  # было 40
+        leftMargin=32,
+        rightMargin=32,
         topMargin=70,
         bottomMargin=50,
     )
@@ -274,7 +275,7 @@ def build_pdf(lang: str, data: Dict) -> bytes:
         fontSize=14,
         leading=18,
         alignment=TA_CENTER,
-        spaceAfter=20,
+        spaceAfter=0,
     )
 
     # Заголовки секций
@@ -305,17 +306,18 @@ def build_pdf(lang: str, data: Dict) -> bytes:
     title = data.get("title") or t(lang, "Конспект", "Summary")
     short = data.get("short_description") or ""
 
-    # ---------- 1-я страница: title + подзаголовок + Summary ----------
-    story.append(Spacer(1, height * 0.12))  # чуть опустить заголовок
-
+    # ---------- 1-я страница: только title + H2 по центру ----------
+    # Подняли/опустили, чтобы визуально было ближе к середине листа
+    story.append(Spacer(1, height * 0.25))  # регулирует «по середине»
     story.append(Paragraph(title, title_style))
-
     if short:
+        story.append(Spacer(1, 8))
         story.append(Paragraph(short, short_style))
-    else:
-        story.append(Spacer(1, 16))
 
-    def add_section(heading: str, bullets: List[str]):
+    # Никакого текста на первой странице → сразу разрыв
+    story.append(PageBreak())
+
+    def section_elements(heading: str, bullets: List[str]) -> List:
         bullets_norm = _normalize_bullets_list(bullets)
         if not bullets_norm:
             return []
@@ -326,7 +328,7 @@ def build_pdf(lang: str, data: Dict) -> bytes:
         items = []
         for b in bullets_norm:
             p = Paragraph(b, bullet_style)
-            items.append(ListItem(p, leftIndent=6))  # небольшой отступ
+            items.append(ListItem(p, leftIndent=6))
 
         elements.append(
             ListFlowable(
@@ -335,25 +337,39 @@ def build_pdf(lang: str, data: Dict) -> bytes:
                 bulletFontName=FONT_NAME,
                 bulletFontSize=11,
                 bulletIndent=0,
-                leftIndent=14,   # меньше отступ → визуально «шире»
+                leftIndent=14,
                 spaceBefore=4,
                 spaceAfter=6,
             )
         )
         return elements
 
-    # Summary на 1-й странице
-    story.extend(add_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or []))
+    # ---------- 2-я страница: Summary ----------
+    story.extend(section_elements(
+        t(lang, "Краткое содержание", "Summary"),
+        data.get("summary") or [],
+    ))
 
-    # Остальные секции — с новой страницы каждая
+    # ---------- 3-я страница: Key tasks ----------
     story.append(PageBreak())
-    story.extend(add_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or []))
+    story.extend(section_elements(
+        t(lang, "Ключевые задачи", "Key tasks"),
+        data.get("key_tasks") or [],
+    ))
 
+    # ---------- 4-я страница: Action plan ----------
     story.append(PageBreak())
-    story.extend(add_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or []))
+    story.extend(section_elements(
+        t(lang, "План действий", "Action plan"),
+        data.get("action_plan") or [],
+    ))
 
+    # ---------- 5-я страница: Conclusion ----------
     story.append(PageBreak())
-    story.extend(add_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or []))
+    story.extend(section_elements(
+        t(lang, "Итог", "Conclusion"),
+        data.get("conclusion") or [],
+    ))
 
     doc.build(story, onFirstPage=add_page_frame, onLaterPages=add_page_frame)
 
