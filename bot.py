@@ -758,7 +758,9 @@ async def send_pdf(query, data: Dict, lang: str):
 
 # ---------- main ----------
 
-async def main():
+# ---------- main ----------
+
+def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -770,18 +772,9 @@ async def main():
     )
     app.add_handler(CallbackQueryHandler(handle_format_choice))
 
-    logger.info("Bot started with webhook")
-
-    port = int(os.environ.get("PORT", 8443))
-    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
-
-    await app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        webhook_url=webhook_url,
-    )
+    logger.info("Bot started (polling)")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
