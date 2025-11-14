@@ -20,22 +20,27 @@ from telegram.ext import (
 from openai import OpenAI
 
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# Google API (для Slides; если не установлено/не настроено – просто не будет работать этот формат)
-try:
-    from google.oauth2.service_account import Credentials
-    from googleapiclient.discovery import build
-except ImportError:  # когда библиотеки не установлены
-    Credentials = None
-    build = None
+# 📄 Нормальный PDF через Platypus (авто-перенос и новые страницы)
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    ListFlowable,
+    ListItem,
+    PageBreak,
+)
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
+
 
 # ---------- PDF-шрифт ----------
 
-FONT_NAME = "DejaVuSans"  # должен лежать рядом с bot.py
+FONT_NAME = "DejaVuSans"  # файл DejaVuSans.ttf должен лежать рядом с bot.py
 pdfmetrics.registerFont(TTFont(FONT_NAME, "DejaVuSans.ttf"))
+
 
 # ---------- Конфиг ----------
 
@@ -43,7 +48,6 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # содержимое JSON серв. аккаунта
 
 MAX_AUDIO_BYTES = 24 * 1024 * 1024  # ~24MB
 
@@ -60,9 +64,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_SLIDES_SERVICE = None
-_DRIVE_SERVICE = None
-
 
 # ---------- Утилиты ----------
 
@@ -76,29 +77,6 @@ def detect_language(text: str) -> str:
 
 def t(lang: str, ru: str, en: str) -> str:
     return ru if lang == "ru" else en
-
-
-def ensure_google_services():
-    """Создаём клиенты Google Slides/Drive из сервисного аккаунта."""
-    global _SLIDES_SERVICE, _DRIVE_SERVICE
-    if _SLIDES_SERVICE and _DRIVE_SERVICE:
-        return _SLIDES_SERVICE, _DRIVE_SERVICE
-
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON не задан")
-
-    if Credentials is None or build is None:
-        raise RuntimeError("Нет библиотек google-api-python-client/google-auth")
-
-    info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    scopes = [
-        "https://www.googleapis.com/auth/presentations",
-        "https://www.googleapis.com/auth/drive.file",
-    ]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    _SLIDES_SERVICE = build("slides", "v1", credentials=creds)
-    _DRIVE_SERVICE = build("drive", "v3", credentials=creds)
-    return _SLIDES_SERVICE, _DRIVE_SERVICE
 
 
 def ffmpeg_convert_to_mp3(input_path: str, output_path: str) -> None:
@@ -207,7 +185,7 @@ async def structure_text(raw_text: str) -> Tuple[str, Dict]:
     return lang, data
 
 
-# ---------- PDF ----------
+# ---------- Вспомогательные функции для текста ----------
 
 def _normalize_bullets_list(raw: List[str]) -> List[str]:
     """
@@ -225,346 +203,144 @@ def _normalize_bullets_list(raw: List[str]) -> List[str]:
     return cleaned
 
 
-def _wrap_text(text: str, max_chars: int) -> List[str]:
-    """Примитивный перенос по словам, чтобы не вылезать за max_chars."""
-    words = text.split()
-    lines: List[str] = []
-    line: List[str] = []
-    cur_len = 0
-
-    for w in words:
-        add = len(w) + (1 if line else 0)
-        if cur_len + add > max_chars:
-            lines.append(" ".join(line))
-            line = [w]
-            cur_len = len(w)
-        else:
-            line.append(w)
-            cur_len += add
-
-    if line:
-        lines.append(" ".join(line))
-    return lines or [""]
-
+# ---------- PDF (автоперенос и новые страницы) ----------
 
 def build_pdf(lang: str, data: Dict) -> bytes:
+    """
+    Аккуратный PDF:
+    - нормальные отступы
+    - автоперенос строк
+    - автоматическое добавление новых страниц, если текста много
+    - списки через bullets
+    """
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
 
-    margin = 72  # ~2 см слева/справа
-    title_font = 22
-    heading_font = 16
-    body_font = 11
-    max_chars = 60  # чтобы строки точно не вылезали за край
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=40,
+        rightMargin=40,
+        topMargin=60,
+        bottomMargin=40,
+    )
+
+    styles = getSampleStyleSheet()
+
+    # Базовый стиль
+    base = styles["Normal"]
+    base.fontName = FONT_NAME
+    base.fontSize = 11
+    base.leading = 14
+
+    # Заголовок (первая страница)
+    title_style = ParagraphStyle(
+        "TitleCustom",
+        parent=styles["Title"],
+        fontName=FONT_NAME,
+        fontSize=22,
+        leading=26,
+        alignment=TA_CENTER,
+        spaceAfter=16,
+    )
+
+    # Краткое описание
+    short_style = ParagraphStyle(
+        "ShortDesc",
+        parent=styles["Normal"],
+        fontName=FONT_NAME,
+        fontSize=12,
+        leading=16,
+        alignment=TA_CENTER,
+        spaceAfter=20,
+    )
+
+    # Дата
+    date_style = ParagraphStyle(
+        "Date",
+        parent=styles["Normal"],
+        fontName=FONT_NAME,
+        fontSize=9,
+        leading=11,
+        alignment=TA_LEFT,
+        spaceAfter=15,
+    )
+
+    # Заголовки секций
+    heading_style = ParagraphStyle(
+        "HeadingCustom",
+        parent=styles["Heading2"],
+        fontName=FONT_NAME,
+        fontSize=16,
+        leading=20,
+        alignment=TA_LEFT,
+        spaceBefore=12,
+        spaceAfter=8,
+    )
+
+    # Текст списков
+    bullet_style = ParagraphStyle(
+        "BulletText",
+        parent=styles["Normal"],
+        fontName=FONT_NAME,
+        fontSize=11,
+        leading=14,
+        leftIndent=0,
+    )
+
+    story: List = []
 
     title = data.get("title") or t(lang, "Конспект", "Summary")
     short = data.get("short_description") or ""
     created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+    created_label = t(lang, "Создано: ", "Created: ") + created_at
 
-    # Положения хедера/футера
-    header_text_y = height - 40
-    header_line_y = header_text_y - 4
-
-    footer_text_y = 30              # текст ближе к низу
-    footer_line_y = footer_text_y + 14  # линия над текстом
-    bottom_limit = footer_line_y + 25   # ниже этого не пишем текст
-
-    date_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
-
-    def draw_header():
-        """Дата/время сверху слева + тонкая линия."""
-        c.setFont(FONT_NAME, 9)
-        c.drawString(margin, header_text_y, date_text)
-        c.setLineWidth(0.5)
-        c.line(margin, header_line_y, width - margin, header_line_y)
-
-    def draw_footer():
-        """Имя бота снизу по центру + тонкая линия с воздухом."""
-        footer_text = "summarinotebot"
-        footer_font = 9
-        c.setLineWidth(0.5)
-        c.line(margin, footer_line_y, width - margin, footer_line_y)
-        c.setFont(FONT_NAME, footer_font)
-        fw = c.stringWidth(footer_text, FONT_NAME, footer_font)
-        c.drawString((width - fw) / 2, footer_text_y, footer_text)
-
-    # ---------- титульная страница ----------
-    draw_header()
-
-    # Заголовок по центру
-    c.setFont(FONT_NAME, title_font)
-    title_w = c.stringWidth(title, FONT_NAME, title_font)
-    c.drawString((width - title_w) / 2, height - 120, title)
-
-    # Краткое описание — по центру под заголовком
+    # ---------- титульная часть ----------
+    story.append(Paragraph(title, title_style))
     if short:
-        c.setFont(FONT_NAME, body_font)
-        y = height - 170
-        for line in _wrap_text(short, max_chars):
-            line_w = c.stringWidth(line, FONT_NAME, body_font)
-            x = (width - line_w) / 2
-            c.drawString(x, y, line)
-            y -= body_font + 4
+        story.append(Paragraph(short, short_style))
+    story.append(Paragraph(created_label, date_style))
+    story.append(Spacer(1, 12))
 
-    draw_footer()
-    c.showPage()
+    # Можно явно добавить разрыв страницы после титула, если нужно
+    story.append(PageBreak())
 
     # ---------- секции ----------
-
-    def draw_section(heading: str, bullets: List[str]):
-        bullets = _normalize_bullets_list(bullets)
-        if not bullets:
+    def add_section(heading: str, bullets: List[str]):
+        bullets_norm = _normalize_bullets_list(bullets)
+        if not bullets_norm:
             return
 
-        draw_header()
-        c.setFont(FONT_NAME, heading_font)
-        c.drawString(margin, height - margin, heading)
+        story.append(Paragraph(heading, heading_style))
 
-        text = c.beginText(margin, height - margin - 30)
-        text.setFont(FONT_NAME, body_font)
+        items = []
+        for b in bullets_norm:
+            p = Paragraph(b, bullet_style)
+            items.append(ListItem(p, leftIndent=10))
 
-        for bullet in bullets:
-            lines = _wrap_text(bullet, max_chars)
-            for i, line in enumerate(lines):
-                prefix = "• " if i == 0 else "   "
-                text.textLine(prefix + line)
-
-                # если подходим к низу страницы — перенос
-                if text.getY() < bottom_limit:
-                    c.drawText(text)
-                    draw_footer()
-                    c.showPage()
-
-                    draw_header()
-                    c.setFont(FONT_NAME, heading_font)
-                    c.drawString(margin, height - margin, heading)
-                    text = c.beginText(margin, height - margin - 30)
-                    text.setFont(FONT_NAME, body_font)
-
-            text.textLine("")  # пустая строка между пунктами
-
-        c.drawText(text)
-        draw_footer()
-        c.showPage()
-
-    draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
-    draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
-    draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
-    draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
-
-    c.save()
-    buf.seek(0)
-    return buf.read()
-
-
-# ---------- Google Slides ----------
-
-def _slides_title_and_bullets_requests(
-    title: str,
-    subtitle: str,
-    slides_data: Dict[str, List[str]],
-    lang: str,
-):
-    """Формируем batchUpdate запросы: титульный + секции."""
-    requests: List[Dict] = []
-
-    def title_slide():
-        slide_id = "title-slide"
-        title_shape_id = "title-box"
-        subtitle_shape_id = "subtitle-box"
-        return [
-            {
-                "createSlide": {
-                    "objectId": slide_id,
-                    "slideLayoutReference": {"predefinedLayout": "BLANK"},
-                }
-            },
-            {
-                "createShape": {
-                    "objectId": title_shape_id,
-                    "shapeType": "TEXT_BOX",
-                    "elementProperties": {
-                        "pageObjectId": slide_id,
-                        "size": {
-                            "width": {"magnitude": 8000000, "unit": "EMU"},
-                            "height": {"magnitude": 800000, "unit": "EMU"},
-                        },
-                        "transform": {
-                            "scaleX": 1,
-                            "scaleY": 1,
-                            "translateX": 800000,
-                            "translateY": 800000,
-                            "unit": "EMU",
-                        },
-                    },
-                }
-            },
-            {
-                "insertText": {
-                    "objectId": title_shape_id,
-                    "insertionIndex": 0,
-                    "text": title,
-                }
-            },
-            {
-                "createShape": {
-                    "objectId": subtitle_shape_id,
-                    "shapeType": "TEXT_BOX",
-                    "elementProperties": {
-                        "pageObjectId": slide_id,
-                        "size": {
-                            "width": {"magnitude": 8000000, "unit": "EMU"},
-                            "height": {"magnitude": 2000000, "unit": "EMU"},
-                        },
-                        "transform": {
-                            "scaleX": 1,
-                            "scaleY": 1,
-                            "translateX": 800000,
-                            "translateY": 2000000,
-                            "unit": "EMU",
-                        },
-                    },
-                }
-            },
-            {
-                "insertText": {
-                    "objectId": subtitle_shape_id,
-                    "insertionIndex": 0,
-                    "text": subtitle,
-                }
-            },
-        ]
-
-    def bullets_slides_for_section(title_text: str, bullets: List[str], base_id: str):
-        reqs: List[Dict] = []
-        bullets_norm = _normalize_bullets_list(bullets)
-        chunk_size = 7
-        for idx in range(0, len(bullets_norm), chunk_size):
-            chunk = bullets_norm[idx : idx + chunk_size]
-            slide_index = idx // chunk_size
-            slide_id = f"{base_id}-{slide_index}"
-            title_shape_id = f"title-{base_id}-{slide_index}"
-            body_shape_id = f"body-{base_id}-{slide_index}"
-
-            title_with_suffix = (
-                title_text if slide_index == 0 else f"{title_text} ({slide_index + 1})"
+        story.append(
+            ListFlowable(
+                items,
+                bulletType="bullet",
+                bulletFontName=FONT_NAME,
+                bulletFontSize=11,
+                bulletIndent=0,
+                leftIndent=15,
+                spaceBefore=4,
+                spaceAfter=10,
             )
+        )
 
-            reqs.extend(
-                [
-                    {
-                        "createSlide": {
-                            "objectId": slide_id,
-                            "slideLayoutReference": {"predefinedLayout": "BLANK"},
-                        }
-                    },
-                    {
-                        "createShape": {
-                            "objectId": title_shape_id,
-                            "shapeType": "TEXT_BOX",
-                            "elementProperties": {
-                                "pageObjectId": slide_id,
-                                "size": {
-                                    "width": {"magnitude": 8000000, "unit": "EMU"},
-                                    "height": {"magnitude": 800000, "unit": "EMU"},
-                                },
-                                "transform": {
-                                    "scaleX": 1,
-                                    "scaleY": 1,
-                                    "translateX": 800000,
-                                    "translateY": 600000,
-                                    "unit": "EMU",
-                                },
-                            },
-                        }
-                    },
-                    {
-                        "insertText": {
-                            "objectId": title_shape_id,
-                            "insertionIndex": 0,
-                            "text": title_with_suffix,
-                        }
-                    },
-                    {
-                        "createShape": {
-                            "objectId": body_shape_id,
-                            "shapeType": "TEXT_BOX",
-                            "elementProperties": {
-                                "pageObjectId": slide_id,
-                                "size": {
-                                    "width": {"magnitude": 8000000, "unit": "EMU"},
-                                    "height": {"magnitude": 4000000, "unit": "EMU"},
-                                },
-                                "transform": {
-                                    "scaleX": 1,
-                                    "scaleY": 1,
-                                    "translateX": 800000,
-                                    "translateY": 1500000,
-                                    "unit": "EMU",
-                                },
-                            },
-                        },
-                    },
-                    {
-                        "insertText": {
-                            "objectId": body_shape_id,
-                            "insertionIndex": 0,
-                            "text": "\n".join(f"• {b}" for b in chunk),
-                        }
-                    },
-                ]
-            )
-        return reqs
+    add_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
+    add_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
+    add_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
+    add_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
 
-    requests.extend(title_slide())
+    # Platypus сам разобьёт story на страницы по высоте
+    doc.build(story)
 
-    section_titles = {
-        "summary": t(lang, "Краткое содержание", "Summary"),
-        "key_tasks": t(lang, "Ключевые задачи", "Key tasks"),
-        "action_plan": t(lang, "План действий", "Action plan"),
-        "conclusion": t(lang, "Итог", "Conclusion"),
-    }
-
-    for key, bullets in slides_data.items():
-        if not bullets:
-            continue
-        requests.extend(bullets_slides_for_section(section_titles[key], bullets, key))
-
-    return requests
-
-
-def build_slides(lang: str, data: Dict) -> str:
-    slides_service, drive_service = ensure_google_services()
-
-    title = data.get("title") or t(lang, "Конспект", "Summary")
-    short = data.get("short_description") or ""
-
-    presentation = slides_service.presentations().create(body={"title": title}).execute()
-    pres_id = presentation["presentationId"]
-    first_slide_id = presentation["slides"][0]["objectId"]
-
-    slides_data = {
-        "summary": data.get("summary") or [],
-        "key_tasks": data.get("key_tasks") or [],
-        "action_plan": data.get("action_plan") or [],
-        "conclusion": data.get("conclusion") or [],
-    }
-
-    requests = [{"deleteObject": {"objectId": first_slide_id}}]
-    requests += _slides_title_and_bullets_requests(title, short, slides_data, lang)
-
-    slides_service.presentations().batchUpdate(
-        presentationId=pres_id, body={"requests": requests}
-    ).execute()
-
-    # Делаем доступ по ссылке
-    drive_service.permissions().create(
-        fileId=pres_id,
-        body={"role": "reader", "type": "anyone"},
-    ).execute()
-
-    return f"https://docs.google.com/presentation/d/{pres_id}/edit"
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes
 
 
 # ---------- Telegram-хендлеры ----------
@@ -572,7 +348,7 @@ def build_slides(lang: str, data: Dict) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 Привет! Отправьте голосовое или аудио, "
-        "я сделаю аккуратную сводку и предложу варианты скачивания.\n\n"
+        "я сделаю аккуратную структурированную сводку и создам PDF.\n\n"
         "Поддерживаю русский и английский языки 🎧"
     )
     await update.message.reply_text(text)
@@ -651,15 +427,13 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.chat_data["last_structured"] = data
 
     keyboard = [
-        [
-            InlineKeyboardButton("📄 PDF", callback_data="format_pdf"),
-            InlineKeyboardButton("📊 Google Slides", callback_data="format_slides"),
-        ]
+        [InlineKeyboardButton("📄 PDF", callback_data="format_pdf")]
     ]
+
     text = t(
         lang,
-        "✨ Финальный штрих…\n\nВ каком формате хотите файл?",
-        "✨ Final touch…\n\nWhich format do you want?",
+        "✨ Финальный штрих…\n\nСгенерировать PDF-конспект?",
+        "✨ Final touch…\n\nGenerate PDF summary?",
     )
 
     await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -684,50 +458,6 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if query.data == "format_pdf":
         await send_pdf(query, data, lang)
-    elif query.data == "format_slides":
-        await send_slides(query, data, lang)
-
-
-async def send_slides(query, data: Dict, lang: str):
-    await query.answer(
-        t(lang, "Создаю презентацию…", "Creating Google Slides deck…"),
-        show_alert=False,
-    )
-    try:
-        link = build_slides(lang, data)
-    except Exception:
-        logger.exception("Ошибка при генерации Slides")
-        await query.message.reply_text(
-            t(
-                lang,
-                "Не удалось создать презентацию. Проверьте настройки Google API.",
-                "Failed to create presentation. Please check Google API settings.",
-            )
-        )
-        return
-
-    await query.message.reply_text(
-        t(
-            lang,
-            f"Готово! Вот ссылка на презентацию:\n{link}",
-            f"Done! Here is your deck:\n{link}",
-        )
-    )
-
-    keyboard = [
-        [
-            InlineKeyboardButton("📄 PDF", callback_data="format_pdf"),
-            InlineKeyboardButton("📊 Google Slides", callback_data="format_slides"),
-        ]
-    ]
-    await query.message.reply_text(
-        t(
-            lang,
-            "Хотите также сохранить в другом формате?",
-            "Do you also want another format?",
-        ),
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
 
 
 async def send_pdf(query, data: Dict, lang: str):
@@ -755,8 +485,6 @@ async def send_pdf(query, data: Dict, lang: str):
         caption=t(lang, "Вот ваш PDF-конспект 🤓", "Here is your PDF summary 🤓"),
     )
 
-
-# ---------- main ----------
 
 # ---------- main ----------
 
