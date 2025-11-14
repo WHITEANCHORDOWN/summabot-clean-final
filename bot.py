@@ -279,72 +279,114 @@ def build_pdf(lang: str, data: Dict) -> bytes:
 
     # ---------- хедер и футер ----------
 
-  # ---------- PDF ----------
+# ---------- PDF ----------
+
+def _normalize_bullets_list(raw: List[str]) -> List[str]:
+    """
+    Чистим список пунктов:
+    - конвертируем в строки
+    - убираем лишние переводы строк и двойные пробелы
+    """
+    cleaned: List[str] = []
+    for item in raw:
+        if not item:
+            continue
+        text = " ".join(str(item).split())  # все виды пробелов/переносов -> один пробел
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def _wrap_text(text: str, max_chars: int) -> List[str]:
+    """
+    Примитивный перенос по словам: стараемся не выходить за max_chars символов в строке.
+    """
+    words = text.split()
+    lines: List[str] = []
+    line: List[str] = []
+    cur_len = 0
+
+    for w in words:
+        add = len(w) + (1 if line else 0)
+        if cur_len + add > max_chars:
+            lines.append(" ".join(line))
+            line = [w]
+            cur_len = len(w)
+        else:
+            line.append(w)
+            cur_len += add
+
+    if line:
+        lines.append(" ".join(line))
+    return lines or [""]
+
 
 def build_pdf(lang: str, data: Dict) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     width, height = A4
 
-    # ----- визуальные параметры -----
-    margin = 72
+    margin = 72  # ~2 см слева/справа
     title_font = 22
     heading_font = 16
     body_font = 11
-    header_footer_font = 9
-    max_chars = 60  # гарантированный перенос строк
+    max_chars = 60  # чтобы строки точно не вылезали за край
 
     title = data.get("title") or t(lang, "Конспект", "Summary")
     short = data.get("short_description") or ""
     created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # ----- координаты -----
+    # Положения хедера/футера
     header_text_y = height - 40
     header_line_y = header_text_y - 4
 
-    footer_text_y = 30
-    footer_line_y = footer_text_y + 14
-    bottom_limit = footer_line_y + 25
+    # Футер: линия + подпись бота с «воздухом»
+    footer_text_y = 30              # текст ближе к низу
+    footer_line_y = footer_text_y + 14  # линия выше текста
+    bottom_limit = footer_line_y + 25   # ниже этого текста не рисуем
 
     date_text = t(lang, f"Создано: {created_at}", f"Created: {created_at}")
 
-    # ---------- Header ----------
     def draw_header():
-        c.setFont(FONT_NAME, header_footer_font)
+        """Дата/время сверху слева + тонкая линия."""
+        c.setFont(FONT_NAME, 9)
         c.drawString(margin, header_text_y, date_text)
         c.setLineWidth(0.5)
         c.line(margin, header_line_y, width - margin, header_line_y)
 
-    # ---------- Footer ----------
     def draw_footer():
+        """Имя бота снизу по центру + тонкая линия с воздухом."""
         footer_text = "summarinotebot"
+        footer_font = 9
         c.setLineWidth(0.5)
         c.line(margin, footer_line_y, width - margin, footer_line_y)
-        c.setFont(FONT_NAME, header_footer_font)
-        fw = c.stringWidth(footer_text, FONT_NAME, header_footer_font)
+        c.setFont(FONT_NAME, footer_font)
+        fw = c.stringWidth(footer_text, FONT_NAME, footer_font)
         c.drawString((width - fw) / 2, footer_text_y, footer_text)
 
-    # ---------- Title Page ----------
+    # ---------- титульная страница ----------
     draw_header()
 
-    # Заголовок
+    # Заголовок по центру
     c.setFont(FONT_NAME, title_font)
     title_w = c.stringWidth(title, FONT_NAME, title_font)
     c.drawString((width - title_w) / 2, height - 120, title)
 
-    # Краткое описание — центрировано
+    # Краткое описание — по центру под заголовком
     if short:
         c.setFont(FONT_NAME, body_font)
         y = height - 170
         for line in _wrap_text(short, max_chars):
-            lw = c.stringWidth(line, FONT_NAME, body_font)
-            c.drawString((width - lw) / 2, y, line)
+            line_w = c.stringWidth(line, FONT_NAME, body_font)
+            x = (width - line_w) / 2
+            c.drawString(x, y, line)
             y -= body_font + 4
 
     draw_footer()
     c.showPage()
 
-    # ---------- Sections ----------
+    # ---------- секции ----------
+
     def draw_section(heading: str, bullets: List[str]):
         bullets = _normalize_bullets_list(bullets)
         if not bullets:
@@ -359,12 +401,11 @@ def build_pdf(lang: str, data: Dict) -> bytes:
 
         for bullet in bullets:
             lines = _wrap_text(bullet, max_chars)
-
             for i, line in enumerate(lines):
                 prefix = "• " if i == 0 else "   "
                 text.textLine(prefix + line)
 
-                # перелистываем
+                # если подходим к нижней границе — переносим на новую страницу
                 if text.getY() < bottom_limit:
                     c.drawText(text)
                     draw_footer()
@@ -376,23 +417,20 @@ def build_pdf(lang: str, data: Dict) -> bytes:
                     text = c.beginText(margin, height - margin - 30)
                     text.setFont(FONT_NAME, body_font)
 
-            text.textLine("")  # отступ между пунктами
+            text.textLine("")  # пустая строка между пунктами
 
         c.drawText(text)
         draw_footer()
         c.showPage()
 
-    # ---------- Run all sections ----------
     draw_section(t(lang, "Краткое содержание", "Summary"), data.get("summary") or [])
     draw_section(t(lang, "Ключевые задачи", "Key tasks"), data.get("key_tasks") or [])
     draw_section(t(lang, "План действий", "Action plan"), data.get("action_plan") or [])
     draw_section(t(lang, "Итог", "Conclusion"), data.get("conclusion") or [])
 
-    # ---------- Output ----------
     c.save()
     buf.seek(0)
     return buf.read()
-
 
 # ---------- Google Slides ----------
 
